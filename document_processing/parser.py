@@ -186,9 +186,9 @@ if __name__ == "__main__":
 
     for page in pages:
         full_text += page["text"] + "\n"
-    print("\n========== RAW EXTRACTED TEXT ==========\n")
-    print(full_text)
-    print("\n========================================\n")    
+    # print("\n========== RAW EXTRACTED TEXT ==========\n")
+    # print(full_text)
+    # print("\n========================================\n")    
 
     invoice = create_invoice_data(full_text)
 

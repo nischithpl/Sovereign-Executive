@@ -1,0 +1,5 @@
+Sovereign-executive
+
+pdf/document content extraction
+
+-using OCR(optimal character recognition) to extract text/tables from scanned pdf, search in scanned pdf using ocr
