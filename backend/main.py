@@ -7,13 +7,18 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-
+from fastapi.middleware.cors import CORSMiddleware
 import analysis
 import database
 
 app = FastAPI(title="Sovereign Executive API")
-
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 class ContractIn(BaseModel):
     vendor_name: str
     agreed_amount: Optional[float] = None
@@ -48,21 +53,32 @@ def upload_and_audit(
     return result
 
 
-@app.get("/api/vendors/{vendor_name}/memory")
-def vendor_memory(vendor_name: str):
-    history = database.get_history(vendor_name, 3)
-    if not history:
-        raise HTTPException(status_code=404, detail="No invoices on file for this vendor.")
-    latest = history[0]
-    return analysis._memory(vendor_name, latest, database.get_contract(vendor_name), history[1:], latest,
-                            analysis.get(latest, "invoice", "currency") or "INR")
+# --- Vendor History / Memory ---
+@app.get("/api/vendors/{vendor}/memory")
+def get_vendor_memory(vendor: str, limit: int = Query(default=5, ge=1, le=20)):
+    history = database.get_history(vendor, limit=limit)
+    return {
+        "vendor": vendor,
+        "history": history
+    }
 
-
+# --- Contracts (Put / Update) ---
 @app.put("/api/contracts")
-def set_contract(c: ContractIn):
-    database.save_contract(c.vendor_name, c.agreed_amount, c.max_increase_pct,
-                           c.renewal_date, c.notice_days, c.clause)
-    return {"saved": c.vendor_name}
+def update_contract(payload: ContractIn):
+    # Converts the Pydantic model into a dictionary and saves it
+    database.save_contract(payload.vendor_name, payload.model_dump())
+    return {
+        "status": "SUCCESS",
+        "message": f"Contract updated for {payload.vendor_name}"
+    }
+
+# --- Contracts (Get) ---
+@app.get("/api/contracts/{vendor}")
+def get_contract(vendor: str):
+    contract = database.get_contract(vendor)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found for vendor")
+    return contract
 
 
 @app.get("/api/renewals")
