@@ -1,78 +1,75 @@
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+"""
+main.py - FastAPI backend. Run from the project root:  uvicorn main:app --reload
 
-from document_processing.extractor import extract_pdf_text
-from document_processing.parser import create_invoice_data
-from document_processing.comparator import compare_invoices
+All logic lives in analysis.py so the API and the Streamlit UI behave identically.
+"""
+from typing import Optional
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel
+
+import analysis
 import database
-import ai_service
 
 app = FastAPI(title="Sovereign Executive API")
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-def parse_pdf(file_path: str) -> dict:
-    pages = extract_pdf_text(file_path)
-    full_text = "\n".join([page["text"] for page in pages])
-    return create_invoice_data(full_text)
+class ContractIn(BaseModel):
+    vendor_name: str
+    agreed_amount: Optional[float] = None
+    max_increase_pct: Optional[float] = None
+    renewal_date: Optional[str] = None  # YYYY-MM-DD
+    notice_days: Optional[int] = None
+    clause: Optional[str] = None
 
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
+# Plain `def` (not async): parsing + Ollama are blocking, FastAPI runs them in a threadpool.
 @app.post("/api/upload-invoice")
-async def upload_and_audit(file: UploadFile = File(...)):
-    temp_path = os.path.join(UPLOAD_DIR, file.filename)
-
+def upload_and_audit(
+    file: UploadFile = File(...),
+    tone: str = Query("firm", pattern="^(firm|polite)$"),
+):
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF invoices are supported.")
     try:
-        # 1. Save uploaded PDF temporarily
-        with open(temp_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        current = analysis.parse_pdf_bytes(file.file.read())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read the PDF: {e}")
 
-        # 2. Extract and parse with Member 1's scripts
-        current_invoice = parse_pdf(temp_path)
-        vendor_name = current_invoice["vendor"]["name"]
+    result = analysis.run_audit(current, tone=tone, save=True, use_memory=True)
+    if result.get("status") == "ERROR":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    result.pop("ai_args", None)
+    return result
 
-        # 3. Check SQLite for an existing previous invoice
-        previous_invoice = database.get_latest_invoice_for_vendor(vendor_name)
 
-        # 4. If this is the first time seeing this vendor:
-        if previous_invoice is None:
-            database.save_invoice(current_invoice)
-            return {
-                "status": "BASELINE_ESTABLISHED",
-                "message": f"First invoice recorded for {vendor_name}. Saved as baseline.",
-                "vendor_name": vendor_name,
-                "current_total": current_invoice["amounts"]["total"],
-                "currency": current_invoice["invoice"]["currency"],
-                "flags": []
-            }
+@app.get("/api/vendors/{vendor_name}/memory")
+def vendor_memory(vendor_name: str):
+    history = database.get_history(vendor_name, 3)
+    if not history:
+        raise HTTPException(status_code=404, detail="No invoices on file for this vendor.")
+    latest = history[0]
+    return analysis._memory(vendor_name, latest, database.get_contract(vendor_name), history[1:], latest,
+                            analysis.get(latest, "invoice", "currency") or "INR")
 
-        # 5. Vendor exists: Run Member 1's comparator
-        comparison = compare_invoices(previous_invoice, current_invoice)
-        if comparison.get("status") == "ERROR":
-            raise HTTPException(status_code=400, detail=comparison.get("message"))
 
-        # Save this current invoice as the new latest record
-        database.save_invoice(current_invoice)
+@app.put("/api/contracts")
+def set_contract(c: ContractIn):
+    database.save_contract(c.vendor_name, c.agreed_amount, c.max_increase_pct,
+                           c.renewal_date, c.notice_days, c.clause)
+    return {"saved": c.vendor_name}
 
-        # 6. Generate AI Explanation & Dispute Email if suspicious
-        ai_note = None
-        dispute_email = None
 
-        if len(comparison.get("flags", [])) > 0:
-            ai_data = ai_service.generate_audit_summary(
-                vendor=comparison["vendor_name"],
-                old_amt=comparison["previous_total"],
-                new_amt=comparison["current_total"],
-                pct=comparison["change_percentage"]
-            )
-            ai_note = ai_data.get("audit_note")
-            dispute_email = ai_data.get("dispute_email")
-
-        comparison["ai_audit_note"] = ai_note
-        comparison["dispute_email_draft"] = dispute_email
-
-        return comparison
-
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+@app.get("/api/renewals")
+def renewals():
+    out = []
+    for c in database.list_contracts():
+        r = analysis.renewal_info(c)
+        if r:
+            out.append({"vendor": c["vendor_name"], **r})
+    return sorted(out, key=lambda x: x["days_to_cancel"])
