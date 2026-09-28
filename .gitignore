@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Sovereign runtime files
+backend/audit_records.db
+backend/uploads/
+uploads/
+audit_records.db
