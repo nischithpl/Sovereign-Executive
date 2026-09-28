@@ -1,4 +1,4 @@
-# AI Module — Sovereign Executive (Member 2's part)
+# AI Module — Sovereign Executive
 
 Runs a local LLM (via Ollama) to analyze contract clauses and explain invoice
 changes. Nothing here calls the internet — everything runs on-device.
