@@ -1,9 +1,10 @@
+import sys
 import os
-import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from extractor import extract_pdf_text
-from parser import create_invoice_data
-from comparator import compare_invoices
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from document_processing.extractor import extract_pdf_text
+from document_processing.parser import create_invoice_data
+from document_processing.comparator import compare_invoices
 import database
 import ai_service
 
