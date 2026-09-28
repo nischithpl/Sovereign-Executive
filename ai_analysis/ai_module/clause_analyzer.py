@@ -1,13 +1,25 @@
 """
-Core AI module for Sovereign Executive.
+Optional clause-explanation layer for Sovereign Executive.
 
-This is the file Member 3 (backend) imports from, and the file Member 1's
-extracted document text eventually flows into.
+ROLE IN THE PIPELINE: this module only *explains* clause wording (type,
+risk level, plain-English reason, evidence phrase). It is NOT the source
+of truth for any number or verdict. The following come exclusively from
+the deterministic layer (contract_terms.py + comparator.py):
+    - price caps (e.g. 5%), contract prices (e.g. Rs 40,000)
+    - discounts, GST/tax rules
+    - recoverable amounts (e.g. Rs 11,100)
+    - percentage changes, invoice differences, contract violations
+Do not use anything returned here to compute or override those values.
+
+Main audit flow:
+    comparator.py (findings) -> ai_service.generate_audit_summary() (Ollama)
 
 Public functions:
     analyze_clause(clause_text, verify=False)   -> dict
     analyze_contract(full_contract_text)        -> list[dict]
-    explain_invoice_change(prev, curr, vendor)  -> dict
+    explain_invoice_change(prev, curr, vendor,
+                           percent_change=None) -> dict
+        (legacy/standalone; the main flow uses ai_service.py instead)
 
 Design choices made for reliability under demo conditions, not just
 correctness:
@@ -211,7 +223,9 @@ def analyze_contract(full_contract_text: str) -> list:
     return flagged
 
 
-def explain_invoice_change(previous_amount: float, current_amount: float, vendor_name: str = "Unknown Vendor") -> dict:
+def explain_invoice_change(previous_amount: float, current_amount: float,
+                          vendor_name: str = "Unknown Vendor",
+                          percent_change: float = None) -> dict:
     """
     Takes two invoice amounts for the same vendor and returns:
     {
@@ -221,11 +235,16 @@ def explain_invoice_change(previous_amount: float, current_amount: float, vendor
         "percent_change": float,
     }
     Falls back to a simple rule if Ollama is unreachable.
-    """
-    if previous_amount == 0:
-        raise ValueError("previous_amount cannot be zero")
 
-    percent_change = round(((current_amount - previous_amount) / previous_amount) * 100, 1)
+    Pass percent_change from comparator.py so this module never becomes a
+    second source of truth for numbers.
+    """
+    # Prefer the value from comparator.py. Only compute locally as a
+    # backwards-compatible convenience when the caller didn't supply one.
+    if percent_change is None:
+        if previous_amount == 0:
+            raise ValueError("previous_amount cannot be zero")
+        percent_change = round(((current_amount - previous_amount) / previous_amount) * 100, 1)
 
     if not _client.is_available():
         severity = "high" if abs(percent_change) >= 15 else "medium" if abs(percent_change) >= 5 else "low"

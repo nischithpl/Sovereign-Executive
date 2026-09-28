@@ -7,6 +7,7 @@ below in the same format.
 
 CLAUSE_ANALYSIS_PROMPT = """You are a contract clause risk analyzer for a financial auditing tool.
 Read the clause below and respond with ONLY valid JSON. No preamble, no markdown, no explanation outside the JSON.
+Only interpret the wording of the clause. Do NOT calculate or invent any amounts, percentages, taxes, or totals, and do not decide whether any invoice violates the contract; other parts of the system do that.
 
 Respond in EXACTLY this JSON format:
 {{
@@ -37,6 +38,7 @@ Answer:
 
 INVOICE_COMPARISON_EXPLANATION_PROMPT = """You are a financial auditing assistant.
 Two invoices from the same vendor are being compared. Explain the change in plain, professional language suitable for a business owner.
+All figures below were already computed; use them exactly as given. Do NOT recalculate, round, or invent any numbers.
 
 Vendor: {vendor_name}
 Previous invoice amount: {previous_amount}
