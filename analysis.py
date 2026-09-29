@@ -24,8 +24,7 @@ for _p in (_HERE, os.path.join(_HERE, "document_processing")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import ai_service  # noqa: E402
-import database  # noqa: E402
+from backend import ai_service, database
 from document_processing.comparator import compare_invoices  # noqa: E402
 from document_processing.extractor import extract_pdf_text  # noqa: E402
 from document_processing.parser import create_invoice_data  # noqa: E402
@@ -209,11 +208,32 @@ def diff_findings(prev, curr, changes, cur):
                                f"Was {money(c['prev'], cur)} on the previous invoice", c["delta"] if disc else None))
     pc, cc = get(prev, "invoice", "currency"), get(curr, "invoice", "currency")
     if pc and cc and norm(pc) != norm(cc):
-        out.append(finding("CURRENCY_CHANGE", "UNEXPLAINED", "Invoice currency changed", f"{pc} -> {cc}"))
-    for key, label in (("payment_terms", "Payment terms"), ("due_date", "Due date")):
-        a, b = get(prev, "invoice", key), get(curr, "invoice", key)
+        out.append(
+            finding(
+                "CURRENCY_CHANGE",
+                "UNEXPLAINED",
+                "Invoice currency changed",
+                f"{pc} -> {cc}"
+            )
+        )
+
+    for key, label in (
+        ("payment_terms", "Payment terms"),
+        ("due_date", "Due date"),
+    ):
+        a = get(prev, "invoice", key)
+        b = get(curr, "invoice", key)
+
         if a and b and norm(a) != norm(b):
-            out.append(finding("TERMS_CHANGE", "UNEXPLAINED", f"{label} changed", f"{a} -> {b}"))
+            out.append(
+                finding(
+                    "TERMS_CHANGE",
+                    "INFO",
+                    f"{label} changed",
+                    f"{a} -> {b}"
+                )
+            )
+
     return out
 
 
