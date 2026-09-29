@@ -8,9 +8,8 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ai_service  # noqa: E402
-import analysis  # noqa: E402
-import database  # noqa: E402
+from backend import ai_service, database
+import analysis
 
 st.set_page_config(page_title="Sovereign Executive", layout="wide")
 
