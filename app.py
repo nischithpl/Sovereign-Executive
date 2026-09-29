@@ -60,14 +60,58 @@ def trend_table(trend):
 
 
 # ---------------------------------------------------------------- result display
-def show_findings(result, cur):
-    flags = result.get("flags", [])
-    if not flags:
-        st.success("No issues found.")
-    for f in flags:
-        amt = f" · **{fmt(f['amount'], cur)}**" if f.get("amount") else ""
-        text = f"**{f['category']}** · {f['type']}{amt}\n\n{f['description']}\n\n{f['evidence']}"
-        (st.error if f["category"] == "VIOLATION" else st.warning if f["category"] == "UNEXPLAINED" else st.info)(text)
+def trend_table(trend):
+    rows = trend.get("rows", [])
+    columns = trend.get("columns", [])
+
+    data = []
+
+    for r in rows:
+        values = list(r.get("values", []))
+
+        # Make column names unique if the same invoice produces duplicates.
+        row = {"Item": r.get("item", "")}
+
+        for i, value in enumerate(values):
+            col_name = columns[i] if i < len(columns) else f"Value {i + 1}"
+
+            # Ensure duplicate column names don't break Pandas Styler.
+            if col_name in row:
+                col_name = f"{col_name} ({i + 1})"
+
+            row[col_name] = value
+
+        row["Δ"] = r.get("delta")
+        row["_status"] = r.get("status")
+
+        data.append(row)
+
+    df = pd.DataFrame(data)
+
+    def style(row):
+        status = row.get("_status")
+        delta_color = COLORS.get(status, "")
+
+        return [
+            f"background-color: {delta_color}; color: #111"
+            if column == "Δ" and delta_color
+            else ""
+            for column in row.index
+        ]
+
+    st.dataframe(
+        df.style
+        .apply(style, axis=1)
+        .hide(axis="columns", subset=["_status"])
+        .format(precision=2, na_rep="—"),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Δ colour: 🟥 increase while a contract violation exists · "
+        "🟨 changed · 🟩 unchanged"
+    )
 
 
 def show_email(result):
@@ -126,6 +170,29 @@ def show_tax(result, cur):
     c4.metric("Tax type", t["kind"] or "n/a")
     st.caption(f"Vendor GSTIN: {t['gstin'] or 'missing'}. Recomputation is plain arithmetic, not an LLM guess. "
                "Expected tax shows only when the invoice states its rate.")
+
+def show_findings(result, cur):
+    flags = result.get("flags", [])
+
+    if not flags:
+        st.success("No issues found.")
+        return
+
+    for f in flags:
+        amt = f" · **{fmt(f['amount'], cur)}**" if f.get("amount") else ""
+
+        text = (
+            f"**{f['category']}** · {f['type']}{amt}\n\n"
+            f"{f['description']}\n\n"
+            f"{f['evidence']}"
+        )
+
+        if f["category"] == "VIOLATION":
+            st.error(text)
+        elif f["category"] == "UNEXPLAINED":
+            st.warning(text)
+        else:
+            st.info(text)
 
 
 def show_result(result):
