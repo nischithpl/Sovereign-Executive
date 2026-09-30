@@ -483,52 +483,483 @@ def _memory(vendor, inv, contract, history, current, cur):
 # ------------------------------------------------------------------ bank reconciliation
 def reconcile_bank(csv_bytes: bytes, invoices: list, tol: float = 1.0) -> dict:
     """
-    Match bank debits to saved invoices (amount within tol AND vendor word in narration).
-    CSV headers are auto-detected: date | description/narration/particulars | amount/debit/withdrawal.
+    Reconcile bank debits against invoices.
+
+    Matching priority:
+    1. Invoice number + amount
+    2. Vendor + amount
+    3. Amount only, but only when there is exactly one candidate
+
+    Invoice number matching is intentionally strongest because multiple
+    invoices can have the same amount.
     """
+
     text = csv_bytes.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
-    cols = {(c or "").strip().lower(): c for c in (reader.fieldnames or [])}
+
+    cols = {
+        (c or "").strip().lower(): c
+        for c in (reader.fieldnames or [])
+    }
 
     def col(*names):
-        for n in names:
-            if n in cols:
-                return cols[n]
+        for name in names:
+            if name in cols:
+                return cols[name]
         return None
 
-    c_desc = col("description", "narration", "particulars", "details")
-    c_amt = col("debit", "withdrawal", "amount", "withdrawal amt.")
-    c_date = col("date", "txn date", "value date")
+    c_desc = col(
+        "description",
+        "narration",
+        "particulars",
+        "details"
+    )
+
+    c_amt = col(
+        "debit",
+        "withdrawal",
+        "amount",
+        "withdrawal amt."
+    )
+
+    c_date = col(
+        "date",
+        "txn date",
+        "value date"
+    )
+
     if not c_amt:
-        return {"error": "Could not find an amount/debit column in the CSV."}
+        return {
+            "error": "Could not find an amount/debit column in the CSV."
+        }
+
+    # ---------------------------------------------------------
+    # Normalize invoice/reference numbers
+    # ---------------------------------------------------------
+
+    def normalize_reference(value):
+        if not value:
+            return ""
+
+        return re.sub(
+            r"[^a-z0-9]",
+            "",
+            str(value).lower()
+        )
+
+    # ---------------------------------------------------------
+    # Normalize vendor names
+    # ---------------------------------------------------------
+
+    def vendor_tokens(name):
+        if not name:
+            return set()
+
+        text = norm(name)
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+        tokens = set(text.split())
+
+        ignored = {
+            "pvt",
+            "private",
+            "ltd",
+            "limited",
+            "llp",
+            "inc",
+            "incorporated",
+            "corp",
+            "corporation",
+            "company",
+            "co",
+            "services",
+            "service",
+            "solutions",
+            "technologies",
+            "technology",
+            "systems",
+            "system",
+            "it",
+        }
+
+        return {
+            token
+            for token in tokens
+            if token not in ignored and len(token) >= 3
+        }
+
+    def vendor_matches(vendor_name, description):
+        if not vendor_name:
+            return True
+
+        vendor = vendor_tokens(vendor_name)
+
+        if not vendor:
+            return True
+
+        bank_text = norm(description)
+        bank_text = re.sub(r"[^a-z0-9\s]", " ", bank_text)
+        bank_tokens = set(bank_text.split())
+
+        return bool(vendor.intersection(bank_tokens))
+
+    # ---------------------------------------------------------
+    # Read bank debits
+    # ---------------------------------------------------------
 
     debits = []
-    for r in reader:
-        a = num(r.get(c_amt))
-        if a and a > 0:
-            debits.append({"date": r.get(c_date) if c_date else "", "description": r.get(c_desc) if c_desc else "", "amount": a})
 
-    matched, used = [], set()
+    for r in reader:
+        amount = num(r.get(c_amt))
+
+        if amount is None or amount <= 0:
+            continue
+
+        debits.append({
+            "date": r.get(c_date) if c_date else "",
+            "description": r.get(c_desc) if c_desc else "",
+            "amount": amount,
+        })
+
+    # ---------------------------------------------------------
+    # MATCHING
+    # ---------------------------------------------------------
+
+    matched = []
+    used = set()
     unpaid = []
+
+    # =========================================================
+    # PASS 1
+    # Exact invoice number + amount
+    #
+    # This MUST happen first.
+    # =========================================================
+
     for inv in invoices:
-        total, v = inv.get("total_amount"), norm(inv.get("vendor_name"))
-        word = v.split()[0] if v else ""
-        hit = None
-        for i, d in enumerate(debits):
+
+        total = num(inv.get("total_amount"))
+
+        if total is None:
+            continue
+
+        invoice_number = normalize_reference(
+            inv.get("invoice_number")
+        )
+
+        if not invoice_number:
+            continue
+
+        for i, debit in enumerate(debits):
+
             if i in used:
                 continue
-            if total is not None and abs(d["amount"] - total) <= tol and (not word or word in norm(d["description"])):
-                hit = i
-                break
-        if hit is None:
-            unpaid.append(inv)
-        else:
-            used.add(hit)
-            matched.append({"vendor": inv["vendor_name"], "invoice": inv["invoice_number"],
-                            "invoice_total": total, "debit": debits[hit]["amount"], "date": debits[hit]["date"]})
-    orphans = [d for i, d in enumerate(debits) if i not in used]
-    return {"matched": matched, "invoices_without_debit": unpaid, "debits_without_invoice": orphans}
 
+            amount_matches = (
+                abs(debit["amount"] - total) <= tol
+            )
+
+            if not amount_matches:
+                continue
+
+            bank_reference = normalize_reference(
+                debit["description"]
+            )
+
+            if invoice_number in bank_reference:
+
+                used.add(i)
+
+                matched.append({
+                    "vendor": inv.get("vendor_name"),
+                    "invoice": inv.get("invoice_number"),
+                    "invoice_total": total,
+                    "debit": debit["amount"],
+                    "difference": round(
+                        debit["amount"] - total,
+                        2
+                    ),
+                    "date": debit["date"],
+                    "description": debit["description"],
+                    "match_type": "Invoice number + amount"
+                })
+
+                break
+
+    # =========================================================
+    # PASS 2
+    # Vendor + amount
+    #
+    # Only invoices that weren't matched in Pass 1.
+    # =========================================================
+
+    matched_invoice_numbers = {
+        normalize_reference(m["invoice"])
+        for m in matched
+    }
+
+    for inv in invoices:
+
+        total = num(inv.get("total_amount"))
+
+        if total is None:
+            unpaid.append(inv)
+            continue
+
+        invoice_number = normalize_reference(
+            inv.get("invoice_number")
+        )
+
+        # Already matched in Pass 1
+        if invoice_number in matched_invoice_numbers:
+            continue
+
+        candidates = []
+
+        for i, debit in enumerate(debits):
+
+            if i in used:
+                continue
+
+            if abs(debit["amount"] - total) > tol:
+                continue
+
+            if vendor_matches(
+                inv.get("vendor_name"),
+                debit["description"]
+            ):
+                candidates.append((i, debit))
+
+        # Exactly one vendor + amount candidate
+        if len(candidates) == 1:
+
+            hit, debit = candidates[0]
+
+            used.add(hit)
+
+            matched.append({
+                "vendor": inv.get("vendor_name"),
+                "invoice": inv.get("invoice_number"),
+                "invoice_total": total,
+                "debit": debit["amount"],
+                "difference": round(
+                    debit["amount"] - total,
+                    2
+                ),
+                "date": debit["date"],
+                "description": debit["description"],
+                "match_type": "Vendor + amount"
+            })
+
+        else:
+            unpaid.append(inv)
+
+    # =========================================================
+    # BANK DEBITS WITHOUT INVOICE
+    # =========================================================
+
+    orphans = [
+        debit
+        for i, debit in enumerate(debits)
+        if i not in used
+    ]
+
+    return {
+        "matched": matched,
+        "invoices_without_debit": unpaid,
+        "debits_without_invoice": orphans
+    }
+
+    # ---------------------------------------------------------
+    # Normalize vendor names
+    # ---------------------------------------------------------
+    def vendor_tokens(name):
+        """
+        Convert:
+        'BluePeak IT Services Pvt Ltd'
+        ->
+        {'bluepeak', 'it', 'services'}
+
+        Removes common legal/company suffixes.
+        """
+
+        if not name:
+            return set()
+
+        text = norm(name)
+
+        # Remove punctuation
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+        tokens = set(text.split())
+
+        ignored = {
+            "pvt",
+            "private",
+            "ltd",
+            "limited",
+            "llp",
+            "inc",
+            "incorporated",
+            "corp",
+            "corporation",
+            "company",
+            "co",
+            "services",
+            "service",
+            "solutions",
+            "technologies",
+            "technology",
+            "systems",
+            "system",
+            "it",
+        }
+
+        return {
+            token
+            for token in tokens
+            if token not in ignored and len(token) >= 3
+        }
+
+    def vendor_matches(vendor_name, description):
+        """
+        Flexible vendor matching.
+
+        Example:
+        Vendor:
+            BluePeak IT Services Pvt Ltd
+
+        Bank:
+            NEFT BLUEPEAK IT SERVICES BP-2026-0701
+
+        -> True
+        """
+
+        if not vendor_name:
+            return True
+
+        vendor = vendor_tokens(vendor_name)
+
+        if not vendor:
+            return True
+
+        bank_text = norm(description)
+        bank_text = re.sub(r"[^a-z0-9\s]", " ", bank_text)
+        bank_tokens = set(bank_text.split())
+
+        # Strong match: at least one meaningful vendor token.
+        if vendor.intersection(bank_tokens):
+            return True
+
+        # Also support joined names such as BLUEPEAKIT
+        compact_bank = "".join(bank_tokens)
+
+        for token in vendor:
+            if token in compact_bank:
+                return True
+
+        return False
+
+    # ---------------------------------------------------------
+    # Read bank debits
+    # ---------------------------------------------------------
+    debits = []
+
+    for r in reader:
+        amount = num(r.get(c_amt))
+
+        if amount is None or amount <= 0:
+            continue
+
+        debits.append({
+            "date": r.get(c_date) if c_date else "",
+            "description": r.get(c_desc) if c_desc else "",
+            "amount": amount,
+        })
+
+    # ---------------------------------------------------------
+    # Match invoices
+    # ---------------------------------------------------------
+    matched = []
+    used = set()
+    unpaid = []
+
+    for inv in invoices:
+
+        total = num(inv.get("total_amount"))
+        vendor_name = inv.get("vendor_name") or ""
+
+        if total is None:
+            unpaid.append(inv)
+            continue
+
+        candidates = []
+
+        for i, debit in enumerate(debits):
+
+            if i in used:
+                continue
+
+            # Amount must match
+            difference = abs(debit["amount"] - total)
+
+            if difference > tol:
+                continue
+
+            # Vendor should match narration
+            vendor_ok = vendor_matches(
+                vendor_name,
+                debit["description"]
+            )
+
+            if not vendor_ok:
+                continue
+
+            candidates.append((i, debit))
+
+        # -----------------------------------------------------
+        # Choose best candidate
+        # -----------------------------------------------------
+        if not candidates:
+            unpaid.append(inv)
+            continue
+
+        # Prefer the smallest amount difference
+        candidates.sort(
+            key=lambda x: abs(x[1]["amount"] - total)
+        )
+
+        hit, debit = candidates[0]
+
+        used.add(hit)
+
+        matched.append({
+            "vendor": vendor_name,
+            "invoice": inv.get("invoice_number"),
+            "invoice_total": total,
+            "debit": debit["amount"],
+            "difference": round(
+                debit["amount"] - total,
+                2
+            ),
+            "date": debit["date"],
+            "description": debit["description"],
+        })
+
+    # ---------------------------------------------------------
+    # Bank transactions with no invoice
+    # ---------------------------------------------------------
+    orphans = [
+        debit
+        for i, debit in enumerate(debits)
+        if i not in used
+    ]
+
+    return {
+        "matched": matched,
+        "invoices_without_debit": unpaid,
+        "debits_without_invoice": orphans,
+    }
 
 # ------------------------------------------------------------------ report
 def build_report_md(r: dict) -> str:
