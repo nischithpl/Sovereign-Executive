@@ -1,6 +1,23 @@
 import os
 import sys
 from datetime import datetime
+from document_processing.contract_parser import parse_contract_bytes
+import io
+import re
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+)
 
 import altair as alt
 import pandas as pd
@@ -60,14 +77,58 @@ def trend_table(trend):
 
 
 # ---------------------------------------------------------------- result display
-def show_findings(result, cur):
-    flags = result.get("flags", [])
-    if not flags:
-        st.success("No issues found.")
-    for f in flags:
-        amt = f" · **{fmt(f['amount'], cur)}**" if f.get("amount") else ""
-        text = f"**{f['category']}** · {f['type']}{amt}\n\n{f['description']}\n\n{f['evidence']}"
-        (st.error if f["category"] == "VIOLATION" else st.warning if f["category"] == "UNEXPLAINED" else st.info)(text)
+def trend_table(trend):
+    rows = trend.get("rows", [])
+    columns = trend.get("columns", [])
+
+    data = []
+
+    for r in rows:
+        values = list(r.get("values", []))
+
+        # Make column names unique if the same invoice produces duplicates.
+        row = {"Item": r.get("item", "")}
+
+        for i, value in enumerate(values):
+            col_name = columns[i] if i < len(columns) else f"Value {i + 1}"
+
+            # Ensure duplicate column names don't break Pandas Styler.
+            if col_name in row:
+                col_name = f"{col_name} ({i + 1})"
+
+            row[col_name] = value
+
+        row["Δ"] = r.get("delta")
+        row["_status"] = r.get("status")
+
+        data.append(row)
+
+    df = pd.DataFrame(data)
+
+    def style(row):
+        status = row.get("_status")
+        delta_color = COLORS.get(status, "")
+
+        return [
+            f"background-color: {delta_color}; color: #111"
+            if column == "Δ" and delta_color
+            else ""
+            for column in row.index
+        ]
+
+    st.dataframe(
+        df.style
+        .apply(style, axis=1)
+        .hide(axis="columns", subset=["_status"])
+        .format(precision=2, na_rep="—"),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Δ colour: 🟥 increase while a contract violation exists · "
+        "🟨 changed · 🟩 unchanged"
+    )
 
 
 def show_email(result):
@@ -127,6 +188,140 @@ def show_tax(result, cur):
     st.caption(f"Vendor GSTIN: {t['gstin'] or 'missing'}. Recomputation is plain arithmetic, not an LLM guess. "
                "Expected tax shows only when the invoice states its rate.")
 
+def show_findings(result, cur):
+    flags = result.get("flags", [])
+
+    if not flags:
+        st.success("No issues found.")
+        return
+
+    for f in flags:
+        amt = f" · **{fmt(f['amount'], cur)}**" if f.get("amount") else ""
+
+        text = (
+            f"**{f['category']}** · {f['type']}{amt}\n\n"
+            f"{f['description']}\n\n"
+            f"{f['evidence']}"
+        )
+
+        if f["category"] == "VIOLATION":
+            st.error(text)
+        elif f["category"] == "UNEXPLAINED":
+            st.warning(text)
+        else:
+            st.info(text)
+
+def markdown_to_pdf(markdown_text):
+    buffer = io.BytesIO()
+
+    # Register Unicode-capable Arial fonts so ₹ renders correctly.
+    pdfmetrics.registerFont(
+        TTFont("Arial", r"C:\Windows\Fonts\arial.ttf")
+    )
+    pdfmetrics.registerFont(
+        TTFont("Arial-Bold", r"C:\Windows\Fonts\arialbd.ttf")
+    )
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName="Arial-Bold",
+        alignment=TA_CENTER,
+        spaceAfter=14,
+    )
+
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        fontName="Arial-Bold",
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["BodyText"],
+        fontName="Arial",
+        fontSize=9.5,
+        leading=13,
+        spaceAfter=6,
+    )
+
+    story = []
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            story.append(Spacer(1, 5))
+            continue
+
+        # Markdown headings
+        if line.startswith("# "):
+            text = line[2:].strip()
+            story.append(Paragraph(text, title_style))
+            continue
+
+        if line.startswith("## "):
+            text = line[3:].strip()
+            story.append(Paragraph(text, heading_style))
+            continue
+
+        if line.startswith("### "):
+            text = line[4:].strip()
+            story.append(
+                Paragraph(
+                    text,
+                    ParagraphStyle(
+                        "ReportHeading3",
+                        parent=styles["Heading3"],
+                        fontName="Arial-Bold",
+                    ),
+                )
+            )
+            continue
+
+        # Horizontal rule
+        if re.fullmatch(r"-{3,}|\*{3,}", line):
+            story.append(Spacer(1, 8))
+            continue
+
+        # Bullet points
+        if line.startswith("- ") or line.startswith("* "):
+            text = line[2:].strip()
+            text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+
+            story.append(
+                Paragraph("• " + text, body_style)
+            )
+            continue
+
+        # Normal paragraph
+        text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", line)
+        text = re.sub(
+            r"`(.*?)`",
+            r"<font name='Courier'>\1</font>",
+            text
+        )
+
+        story.append(Paragraph(text, body_style))
+
+    doc.build(story)
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
 
 def show_result(result):
     status = result["status"]
@@ -162,8 +357,20 @@ def show_result(result):
         d2.metric("Current total", fmt(result["current_total"], cur),
                   delta=f"{result['change_percentage']:+.2f}%", delta_color="inverse")
         d3.metric("Change", fmt(result["change_amount"], cur))
-        st.caption(f"Invoices compared: {result['previous_invoice_number']} → {result['current_invoice_number']}")
+        st.caption(f"Comparison source: {result.get('previous_invoice_number', 'Unknown')} "f"→ {result.get('current_invoice_number', 'Unknown')}")
+        prev_num = result.get("previous_invoice_number")
+        curr_num = result.get("current_invoice_number")
 
+        if prev_num:
+            st.info(
+                f"Compared against saved invoice **{prev_num}** → "
+                f"current invoice **{curr_num}**"
+            )
+        else:
+            st.info(
+            f"No previous invoice found in vendor memory. "
+            f"**{curr_num}** was established as the baseline."
+            )
     tabs = st.tabs(["Findings", "Comparison", "Tax check", "Vendor memory", "Dispute email", "Report"])
     with tabs[0]:
         show_findings(result, cur)
@@ -184,49 +391,458 @@ def show_result(result):
         show_email(result)
     with tabs[5]:
         md = analysis.build_report_md(result)
-        st.download_button("Download report (Markdown)", md, file_name="audit_report.md")
+
         st.markdown(md)
+
+        pdf_data = markdown_to_pdf(md)
+
+        st.code(md)
+
+        st.download_button(
+                label="📄 Download Audit Report as PDF",
+            data=pdf_data,
+            file_name="sovereign_audit_report.pdf",
+            mime="application/pdf",
+        )
 
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
+
     st.header("Settings")
-    tone = st.selectbox("Dispute email tone", ["firm", "polite"])
-    use_memory = st.checkbox("Use & update vendor memory", value=True,
-                             help="Loads previous invoices from the local database and saves this one.")
 
+    tone = st.selectbox(
+        "Dispute email tone",
+        ["firm", "polite"]
+    )
+
+    use_memory = st.checkbox(
+        "Use & update vendor memory",
+        value=True,
+        help="Loads previous invoices from the local database and saves this one."
+    )
+
+    # ---------------------------------------------------------
+    # Contract terms
+    # ---------------------------------------------------------
     with st.expander("Contract terms (ground truth)"):
-        default_vendor = (st.session_state.get("result") or {}).get("vendor_name", "")
-        with st.form("contract_form"):
-            v = st.text_input("Vendor name", value=default_vendor)
-            agreed = st.number_input("Agreed price (pre-tax)", min_value=0.0, value=0.0)
-            cap = st.number_input("Max annual increase %", min_value=0.0, value=0.0)
-            renew = st.text_input("Renewal date (YYYY-MM-DD)")
-            notice = st.number_input("Notice days", min_value=0, value=30)
-            clause = st.text_input("Price clause (quoted in emails)", placeholder="Clause 4.2, page 3: price fixed for 12 months")
-            if st.form_submit_button("Save contract"):
+
+        # -----------------------------------------------------
+        # Add contract document
+        # -----------------------------------------------------
+        st.markdown("### Add contract document")
+
+        contract_file = st.file_uploader(
+            "Upload contract PDF",
+            type=["pdf"],
+            key="contract_pdf"
+        )
+
+        if contract_file is not None:
+
+            if st.button(
+                "Extract contract terms",
+                key="extract_contract"
+            ):
+
                 try:
+                    with st.spinner(
+                        "Reading contract and extracting terms..."
+                    ):
+
+                        contract = parse_contract_bytes(
+                            contract_file.getvalue()
+                        )
+
+                    st.session_state["extracted_contract"] = contract
+
+                    st.success(
+                        "Contract terms extracted successfully."
+                    )
+
+                except Exception as e:
+                    st.error(
+                        f"Could not process contract: {e}"
+                    )
+
+        # -----------------------------------------------------
+        # Show extracted contract
+        # -----------------------------------------------------
+        extracted = st.session_state.get(
+            "extracted_contract"
+        )
+
+        if extracted:
+
+            st.markdown("### Extracted contract terms")
+
+            vendor = extracted.get("vendor_name")
+            agreed_price = extracted.get("agreed_price")
+            max_increase = extracted.get(
+                "max_annual_increase"
+            )
+            renewal_date = extracted.get(
+                "renewal_date"
+            )
+            notice_days = extracted.get(
+                "notice_days"
+            )
+            price_clause = extracted.get(
+                "price_clause"
+            )
+
+            st.write(
+                f"**Vendor:** "
+                f"{vendor or 'Not detected'}"
+            )
+
+            if agreed_price is not None:
+                st.write(
+                    f"**Agreed price:** "
+                    f"₹{agreed_price:,.2f}"
+                )
+            else:
+                st.write(
+                    "**Agreed price:** Not detected"
+                )
+
+            if max_increase is not None:
+                st.write(
+                    f"**Maximum annual increase:** "
+                    f"{max_increase}%"
+                )
+            else:
+                st.write(
+                    "**Maximum annual increase:** "
+                    "Not detected"
+                )
+
+            st.write(
+                f"**Renewal date:** "
+                f"{renewal_date or 'Not detected'}"
+            )
+
+            if notice_days is not None:
+                st.write(
+                    f"**Notice period:** "
+                    f"{notice_days} days"
+                )
+            else:
+                st.write(
+                    "**Notice period:** Not detected"
+                )
+
+            st.write(
+                f"**Price clause:** "
+                f"{price_clause or 'Not detected'}"
+            )
+
+            # -------------------------------------------------
+            # Save extracted contract
+            # -------------------------------------------------
+            if st.button(
+                "Save extracted contract",
+                key="save_extracted_contract"
+            ):
+
+                try:
+
+                    if not vendor:
+                        raise ValueError(
+                            "Vendor name could not be detected "
+                            "from the contract."
+                        )
+
+                    database.save_contract(
+                        vendor_name=vendor,
+                        agreed_price=agreed_price,
+                        max_annual_increase=max_increase,
+                        renewal_date=renewal_date,
+                        notice_days=notice_days or 30,
+                        price_clause=price_clause,
+                    )
+
+                    st.success(
+                        f"Contract saved for {vendor}."
+                    )
+
+                    st.session_state.pop(
+                        "extracted_contract",
+                        None
+                    )
+
+                    st.rerun()
+
+                except Exception as e:
+
+                    st.error(
+                        f"Could not save contract: {e}"
+                    )
+
+            st.divider()
+
+        # -----------------------------------------------------
+        # Existing manual contract entry
+        # -----------------------------------------------------
+        st.markdown("### Enter contract manually")
+
+        default_vendor = (
+            st.session_state.get("result") or {}
+        ).get("vendor_name", "")
+
+        with st.form("contract_form"):
+
+            v = st.text_input(
+                "Vendor name",
+                value=default_vendor
+            )
+
+            agreed = st.number_input(
+                "Agreed price (pre-tax)",
+                min_value=0.0,
+                value=0.0
+            )
+
+            cap = st.number_input(
+                "Max annual increase %",
+                min_value=0.0,
+                value=0.0
+            )
+
+            renew = st.text_input(
+                "Renewal date (YYYY-MM-DD)"
+            )
+
+            notice = st.number_input(
+                "Notice days",
+                min_value=0,
+                value=30
+            )
+
+            clause = st.text_input(
+                "Price clause (quoted in emails)",
+                placeholder=(
+                    "Clause 4.2, page 3: "
+                    "price fixed for 12 months"
+                )
+            )
+
+            if st.form_submit_button(
+                "Save contract"
+            ):
+
+                try:
+
                     if renew:
-                        datetime.strptime(renew, "%Y-%m-%d")
+                        datetime.strptime(
+                            renew,
+                            "%Y-%m-%d"
+                        )
+
                     if not v.strip():
-                        raise ValueError("Vendor name is required")
-                    database.save_contract(v, agreed or None, cap or None, renew or None, int(notice), clause or None)
-                    st.success("Contract saved.")
+                        raise ValueError(
+                            "Vendor name is required"
+                        )
+
+                    database.save_contract(
+                        v,
+                        agreed or None,
+                        cap or None,
+                        renew or None,
+                        int(notice),
+                        clause or None
+                    )
+
+                    st.success(
+                        "Contract saved."
+                    )
+
                 except ValueError as e:
-                    st.error(f"Invalid input: {e}")
 
+                    st.error(
+                        f"Invalid input: {e}"
+                    )
+
+    # ---------------------------------------------------------
+    # Renewal calendar
+    # ---------------------------------------------------------
     st.subheader("Renewal calendar")
-    cal = [(c["vendor_name"], analysis.renewal_info(c)) for c in database.list_contracts()]
-    cal = sorted([(n, r) for n, r in cal if r], key=lambda x: x[1]["days_to_cancel"])
-    if not cal:
-        st.caption("No renewals tracked yet.")
-    for name, r in cal:
-        icon = "🔴" if r["days_to_cancel"] < 0 else "🟠" if r["days_to_cancel"] <= 30 else "🟢"
-        st.write(f"{icon} **{name}**: cancel by {r['cancel_by']} ({r['days_to_cancel']}d)")
 
+    cal = [
+        (
+            c["vendor_name"],
+            analysis.renewal_info(c)
+        )
+        for c in database.list_contracts()
+    ]
+
+    cal = sorted(
+        [
+            (n, r)
+            for n, r in cal
+            if r
+        ],
+        key=lambda x: x[1]["days_to_cancel"]
+    )
+
+    if not cal:
+        st.caption(
+            "No renewals tracked yet."
+        )
+
+    for name, r in cal:
+
+        icon = (
+            "🔴"
+            if r["days_to_cancel"] < 0
+            else "🟠"
+            if r["days_to_cancel"] <= 30
+            else "🟢"
+        )
+
+        st.write(
+            f"{icon} **{name}**: "
+            f"cancel by {r['cancel_by']} "
+            f"({r['days_to_cancel']}d)"
+        )
+
+
+def show_previous_invoices():
+    st.header("Previous Invoices")
+
+    invoices = database.list_invoices()
+
+    if not invoices:
+        st.info("No previous invoices have been saved yet.")
+        return
+
+    # Get unique vendors
+    vendors = sorted(
+        set(
+            invoice.get("vendor_name") or "Unknown vendor"
+            for invoice in invoices
+        )
+    )
+
+    # Vendor filter
+    selected_vendor = st.selectbox(
+        "Filter by vendor",
+        ["All Vendors"] + vendors,
+        key="previous_invoice_vendor"
+    )
+
+    # Filter invoices
+    if selected_vendor != "All Vendors":
+        invoices = [
+            invoice
+            for invoice in invoices
+            if (invoice.get("vendor_name") or "Unknown vendor")
+            == selected_vendor
+        ]
+
+    if not invoices:
+        st.info(f"No previous invoices found for {selected_vendor}.")
+        return
+
+    st.caption(f"Showing {len(invoices)} invoice(s)")
+
+    # Display invoices
+    for invoice in invoices:
+        vendor = invoice.get("vendor_name") or "Unknown vendor"
+        invoice_number = invoice.get("invoice_number") or "Unknown"
+        total = invoice.get("total_amount") or 0.0
+        currency = invoice.get("currency") or "INR"
+        created_at = invoice.get("created_at") or "Unknown date"
+
+        # Use database ID for deletion
+        invoice_id = invoice.get("id")
+
+        with st.expander(
+            f"{vendor} — {invoice_number} — {fmt(total, currency)}"
+        ):
+            c1, c2, c3 = st.columns(3)
+
+            c1.write(f"**Vendor:** {vendor}")
+            c2.write(f"**Invoice:** {invoice_number}")
+            c3.write(f"**Total:** {fmt(total, currency)}")
+
+            st.write(f"**Saved:** {created_at}")
+
+            invoice_data = invoice
+
+            st.write(
+                f"**Subtotal:** "
+                f"{fmt(invoice_data.get('subtotal'), currency)}"
+            )
+
+            st.write(
+                f"**Tax:** "
+                f"{fmt(invoice_data.get('tax'), currency)}"
+            )
+
+            st.divider()
+
+            # -------------------------------------------------
+            # Delete invoice
+            # -------------------------------------------------
+
+            delete_key = f"delete_invoice_{invoice_id}"
+
+            if st.button(
+                "🗑️ Delete invoice",
+                key=delete_key
+            ):
+                st.session_state["confirm_delete_invoice"] = invoice_id
+
+            # -------------------------------------------------
+            # Confirmation
+            # -------------------------------------------------
+
+            if (
+                st.session_state.get("confirm_delete_invoice")
+                == invoice_id
+            ):
+                st.warning(
+                    f"Are you sure you want to delete "
+                    f"**{invoice_number}**?"
+                )
+
+                confirm_col, cancel_col = st.columns(2)
+
+                with confirm_col:
+                    if st.button(
+                        "Yes, delete",
+                        key=f"confirm_delete_{invoice_id}"
+                    ):
+                        database.delete_invoice(invoice_id)
+
+                        st.session_state.pop(
+                            "confirm_delete_invoice",
+                            None
+                        )
+
+                        st.success(
+                            f"Invoice {invoice_number} deleted."
+                        )
+
+                        st.rerun()
+
+                with cancel_col:
+                    if st.button(
+                        "Cancel",
+                        key=f"cancel_delete_{invoice_id}"
+                    ):
+                        st.session_state.pop(
+                            "confirm_delete_invoice",
+                            None
+                        )
+
+                        st.rerun()
 # ---------------------------------------------------------------- page
 st.title("Sovereign Executive")
 st.subheader("The Air-Gapped Financial and Contract Auditor")
+with st.expander("📁 Previous Invoices"):
+    show_previous_invoices()
 st.write("Upload invoices to check for suspicious changes. Fully offline, nothing leaves this device.")
 
 col_prev, col_curr = st.columns(2)

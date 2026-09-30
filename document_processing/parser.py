@@ -155,6 +155,15 @@ def extract_vendor_name(text):
             flags=re.IGNORECASE,
         )
 
+        # Remove trailing invoice/customer labels accidentally attached
+        # to the vendor name during PDF extraction.
+        line = re.sub(
+            r"\s+(?:BILL\s+TO|CUSTOMER)\s*:?\s*$",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+
         return line.strip()
 
     # ---------------------------------------------------------

@@ -126,7 +126,7 @@ def get_history(vendor: str, limit: int = 3) -> list:
     rows = cur.fetchall()
     conn.close()
 
-    return [json.loads(r[0]) for r in reversed(rows)]
+    return [json.loads(r[0]) for r in rows]
 
 
 def save_contract(
@@ -142,24 +142,61 @@ def save_contract(
     conn = get_connection()
     cur = conn.cursor()
 
+    vendor_name = vendor_name.strip()
+
+    # Check whether this vendor already has a contract
     cur.execute("""
-        INSERT INTO contracts (
+        SELECT id
+        FROM contracts
+        WHERE LOWER(TRIM(vendor_name)) = LOWER(TRIM(?))
+        ORDER BY id DESC
+        LIMIT 1
+    """, (vendor_name,))
+
+    existing = cur.fetchone()
+
+    if existing:
+        # Update existing contract instead of creating a duplicate
+        cur.execute("""
+            UPDATE contracts
+            SET
+                vendor_name = ?,
+                agreed_price = ?,
+                max_annual_increase = ?,
+                renewal_date = ?,
+                notice_days = ?,
+                price_clause = ?
+            WHERE id = ?
+        """, (
+            vendor_name,
+            agreed_price,
+            max_annual_increase,
+            renewal_date,
+            notice_days,
+            price_clause,
+            existing[0]
+        ))
+
+    else:
+        # New vendor → create new contract
+        cur.execute("""
+            INSERT INTO contracts (
+                vendor_name,
+                agreed_price,
+                max_annual_increase,
+                renewal_date,
+                notice_days,
+                price_clause
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
             vendor_name,
             agreed_price,
             max_annual_increase,
             renewal_date,
             notice_days,
             price_clause
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        vendor_name.strip(),
-        agreed_price,
-        max_annual_increase,
-        renewal_date,
-        notice_days,
-        price_clause
-    ))
+        ))
 
     conn.commit()
     conn.close()
@@ -241,75 +278,26 @@ def count_invoices(vendor_name=None) -> int:
 # IMPORTANT:
 # Initialize the database whenever this module is imported.
 init_db()
+
 def list_invoices() -> list:
-    conn = sqlite3.connect(DB_FILE)
+    init_db()
+
+    conn = get_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT
-            id,
-            vendor_name,
-            invoice_number,
-            total,
-            currency,
-            raw_data,
-            created_at
-        FROM invoices
-        ORDER BY id DESC
-    """)
-
-    rows = cur.fetchall()
-    conn.close()
-
-    invoices = []
-
-    for row in rows:
-        invoice = dict(row)
-
-        # Prefer the original parsed invoice structure
-        if invoice.get("raw_data"):
-            try:
-                parsed = json.loads(invoice["raw_data"])
-                if isinstance(parsed, dict):
-                    invoices.append(parsed)
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # Fallback if raw_data cannot be decoded
-        invoices.append(invoice)
-
-    return invoices
-def list_invoices() -> list:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vendor_name TEXT,
-            invoice_number TEXT,
-            total REAL,
-            currency TEXT,
-            raw_data TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    cur.execute("""
-        SELECT
-            vendor_name,
-            invoice_number,
-            total,
-            currency,
-            raw_data,
-            created_at
-        FROM invoices
-        ORDER BY id DESC
-    """)
-
+    SELECT
+        id,
+        vendor_name,
+        invoice_number,
+        total,
+        currency,
+        raw_data,
+        created_at
+    FROM invoices
+    ORDER BY id DESC
+""")
     rows = cur.fetchall()
     conn.close()
 
@@ -321,7 +309,6 @@ def list_invoices() -> list:
         except (json.JSONDecodeError, TypeError):
             data = {}
 
-        # Make sure reconcile_bank() gets the exact fields it expects
         data["vendor_name"] = (
             data.get("vendor_name")
             or row["vendor_name"]
@@ -334,6 +321,7 @@ def list_invoices() -> list:
             or row["invoice_number"]
             or ""
         )
+        data["id"] = row["id"]
 
         data["total_amount"] = (
             data.get("total_amount")
@@ -342,8 +330,28 @@ def list_invoices() -> list:
             or 0.0
         )
 
-        data["currency"] = data.get("currency") or row["currency"] or "USD"
+        data["currency"] = (
+            data.get("currency")
+            or row["currency"]
+            or "USD"
+        )
+
+        data["created_at"] = row["created_at"]
 
         invoices.append(data)
 
+ 
     return invoices
+def delete_invoice(invoice_id: int):
+    init_db()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM invoices WHERE id = ?",
+        (invoice_id,)
+    )
+
+    conn.commit()
+    conn.close()    
