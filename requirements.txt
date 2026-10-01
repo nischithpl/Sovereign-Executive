@@ -4,3 +4,9 @@ python-multipart
 pymupdf
 requests
 streamlit
+pandas
+altair
+reportlab
+# Optional: OCR for scanned PDFs (also needs the Tesseract binary installed)
+pillow
+pytesseract
