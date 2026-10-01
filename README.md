@@ -6,7 +6,7 @@
 
 **Catch vendor overcharges, contract violations and tax errors, with evidence, page-and-clause citations, and a ready-to-send dispute email. Local-first and air-gapped by design: documents are processed on your own machine, and the only service it talks to is a local Ollama model.**
 
-[![CI](https://github.com/nischithpl/Sovereign-Executive/actions/workflows/ci.yml/badge.svg)](https://github.com/nischithpl/Sovereign-Executive/actions/workflows/ci.yml) ![Coverage](https://img.shields.io/badge/coverage-65%25-yellowgreen) ![Lint](https://img.shields.io/badge/lint-ruff%20passing-brightgreen)
+[![CI](https://github.com/nischithpl/Sovereign-Executive/actions/workflows/ci.yml/badge.svg)](https://github.com/nischithpl/Sovereign-Executive/actions/workflows/ci.yml) ![Coverage](https://img.shields.io/badge/coverage-75%25-green) ![Lint](https://img.shields.io/badge/lint-ruff%20passing-brightgreen)
 
 **ASYNC'26 · Track 01 · Sovereign AI**
 
@@ -79,8 +79,7 @@ Vendor overcharges rarely look like fraud; they look like a 4% price creep, a sm
 | ![Dashboard](docs/screenshots/01-dashboard.png)<br>**Invoice analysis dashboard**: leakage, violations, projected annual impact | ![Waterfall](docs/screenshots/02-waterfall.png)<br>**Waterfall / financial impact**: why the bill changed |
 | ![Findings](docs/screenshots/03-findings.png)<br>**Contract + evidence findings**: violation › unexplained › info | ![Tax](docs/screenshots/04-tax-report.png)<br>**Tax check & auto-generated report** |
 
-<!-- Optional: add a GIF or a video link -->
-<!-- 🎥 **Demo video:** https://youtu.be/XXXXXXXX -->
+🎥 **Demo video:** https://youtu.be/aXpmZK2Cog8?si=FeP9c9QjC0wycg0h
 
 ### What it finds on the demo dataset
 
@@ -364,7 +363,7 @@ ruff check . --select E9,F63,F7,F82                          # lint: syntax erro
 
 CI (`.github/workflows/ci.yml`) runs lint + tests + coverage on Python 3.11 and 3.12 for every push and pull request.
 
-**What the current suite verifies (6 tests, 65% coverage of `document_processing`; `contract_parser.py` is not yet covered):** number parsing, invoice extraction at 100% confidence, contract-term extraction with page/clause citations, detection of all five planted contract violations with the exact recoverable amount (₹11,100), zero false violations on the two clean invoices, and blocking of cross-vendor comparisons.
+**What the current suite verifies (6 tests, 75% coverage of `document_processing`; `contract_parser.py` is not yet covered):** number parsing, invoice extraction at 100% confidence, contract-term extraction with page/clause citations, detection of all five planted contract violations with the exact recoverable amount (₹11,100), zero false violations on the two clean invoices, and blocking of cross-vendor comparisons.
 
 ---
 
