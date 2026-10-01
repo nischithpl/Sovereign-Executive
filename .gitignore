@@ -3,10 +3,19 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+.venv/
 .env
 
 # Sovereign runtime files
+invoices.db
 backend/audit_records.db
 backend/uploads/
 uploads/
 audit_records.db
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+
+# Generated demo data (recreate with: python make_demo_data.py)
+samples/
