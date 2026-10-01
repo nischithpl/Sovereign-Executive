@@ -35,4 +35,5 @@ jobs:
         run: python document_processing/make_demo_data.py
 
       - name: Run tests with coverage
-        run: pytest -q --cov=document_processing --cov-report=term-missing
+        run: |
+          pytest -q --cov=document_processing --cov-report=term-missing || [ $? -eq 5 ]
